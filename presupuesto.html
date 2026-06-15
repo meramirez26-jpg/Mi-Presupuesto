@@ -489,7 +489,69 @@ function gastosDeMes() { return state.gastos.filter(g => g.fecha && g.fecha.star
 function gastadoDePartida(pid) { return gastosDeMes().filter(g => g.partidaId === pid).reduce((a,g) => a + Number(g.monto), 0); }
 function totalPresupuesto() { return state.partidas.reduce((a,p) => a + Number(p.monto), 0); }
 function totalGastado() { return gastosDeMes().reduce((a,g) => a + Number(g.monto), 0); }
-function totalTC() { return gastosDeMes().filter(g => g.tipo === 'tc').reduce((a,g) => a + Number(g.monto), 0); }
+
+// ============ TC CYCLE ============
+// El periodo TC va del día 13 de un mes al día 12 del mes siguiente.
+// Ejemplo: periodo activo = 13 Jun → 12 Jul. Corte el 12 Jul, pago 25 días después = 6 Ago.
+function getTCPeriodo() {
+  const hoy = new Date();
+  const diaCorte = state.tc.corte || 12;
+  const diaInicio = diaCorte + 1; // día 13
+  let inicioMes, inicioAnio, finMes, finAnio;
+  if (hoy.getDate() >= diaInicio) {
+    // Estamos en la segunda mitad: periodo inició este mes
+    inicioAnio = hoy.getFullYear(); inicioMes = hoy.getMonth();
+    // Termina el día de corte del mes siguiente
+    const fin = new Date(hoy.getFullYear(), hoy.getMonth() + 1, diaCorte);
+    finAnio = fin.getFullYear(); finMes = fin.getMonth();
+  } else {
+    // Estamos en la primera mitad: periodo inició el mes anterior
+    const ini = new Date(hoy.getFullYear(), hoy.getMonth() - 1, diaInicio);
+    inicioAnio = ini.getFullYear(); inicioMes = ini.getMonth();
+    finAnio = hoy.getFullYear(); finMes = hoy.getMonth();
+  }
+  const inicio = new Date(inicioAnio, inicioMes, diaInicio);
+  const fin = new Date(finAnio, finMes, diaCorte);
+  // Fecha límite de pago = corte + 25 días
+  const fechaPago = new Date(fin); fechaPago.setDate(fechaPago.getDate() + 25);
+  return { inicio, fin, fechaPago };
+}
+
+function gastosDelPeriodoTC() {
+  const { inicio, fin } = getTCPeriodo();
+  return state.gastos.filter(g => {
+    if (g.tipo !== 'tc') return false;
+    const f = new Date(g.fecha + 'T12:00');
+    return f >= inicio && f <= fin;
+  });
+}
+
+function totalTC() { return gastosDelPeriodoTC().reduce((a,g) => a + Number(g.monto), 0); }
+
+// Detectar si hoy es día de corte (día 12) → generar corte automático
+function checkCierreAutomatico() {
+  if (!state.tc.corte) return;
+  const hoy = new Date();
+  if (hoy.getDate() === state.tc.corte) {
+    const claveCorte = `${hoy.getFullYear()}-${String(hoy.getMonth()+1).padStart(2,'0')}-${String(hoy.getDate()).padStart(2,'0')}`;
+    if (state.corte.ultimoCierreAuto === claveCorte) return; // ya se procesó hoy
+    const totalPeriodo = gastosDelPeriodoTC().reduce((a,g) => a + Number(g.monto), 0);
+    if (totalPeriodo > 0) {
+      const fechaPago = getTCPeriodo().fechaPago;
+      const yyyy = fechaPago.getFullYear();
+      const mm = String(fechaPago.getMonth()+1).padStart(2,'0');
+      const dd = String(fechaPago.getDate()).padStart(2,'0');
+      state.corte = {
+        saldo: totalPeriodo,
+        fecha: `${yyyy}-${mm}-${dd}`,
+        estado: 'pendiente',
+        ultimoCierreAuto: claveCorte
+      };
+      save();
+      showToast('🗓️ ¡Corte generado automáticamente!');
+    }
+  }
+}
 
 function showToast(msg) {
   const t = document.getElementById('toast');
@@ -648,23 +710,17 @@ function renderTC() {
   const tcGast = totalTC(), tcDisp = state.tc.limite - tcGast;
   const pct = state.tc.limite > 0 ? Math.min(100, Math.round(tcGast/state.tc.limite*100)) : 0;
   const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--yellow)' : 'var(--green)';
-  if (!state.tc.limite) { el.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="empty-text">Configura tu tarjeta primero.</div></div>'; }
-  else { el.innerHTML = `<div style="font-size:13px;color:var(--muted);margin-bottom:10px">${state.tc.banco||'Tarjeta'} · Corte día ${state.tc.corte}</div>
-    <div class="tc-row" style="margin-bottom:12px">
-      <div class="tc-box"><div class="label">Límite</div><div class="val">${fmt(state.tc.limite)}</div></div>
-      <div class="tc-box"><div class="label">Gastado</div><div class="val" style="color:var(--accent2)">${fmt(tcGast)}</div></div>
-      <div class="tc-box"><div class="label">Disponible</div><div class="val" style="color:${tcDisp<0?'var(--danger)':'var(--green)'}">${fmt(tcDisp)}</div></div>
-    </div>
-    <div class="progress-label" style="font-size:11px;color:var(--muted);display:flex;justify-content:space-between;margin-bottom:4px"><span>Uso del límite</span><span>${pct}%</span></div>
-    <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${color}"></div></div>`; }
-  const tcGastos = gastosDeMes().filter(g => g.tipo==='tc').sort((a,b) => b.fecha.localeCompare(a.fecha));
-  lista.innerHTML = !tcGastos.length ? '<div class="empty-state"><div class="empty-text">Sin gastos con TC este mes.</div></div>'
+  if (!state.tc.limite) {
+    el.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="empty-text">Configura tu tarjeta primero.</div></div>';
+  } else {
+    const { inicio, fin, fechaPago } = getTCPeriodo();
+    const fmtF = f => f.toLocaleDateString('es-MX',{day:'numeric',month:'short'});
+    el.innerHTML = `<div style="font-size:13px;color:var(--muted);margin-bottom:6px">${state.tc.banco||'Tarjeta'} · Corte día ${state.tc.corte}</div><div style="font-size:12px;color:var(--accent);margin-bottom:10px">📅 Periodo: ${fmtF(inicio)} → ${fmtF(fin)} · Pago límite: ${fmtF(fechaPago)}</div><div class="tc-row" style="margin-bottom:12px"><div class="tc-box"><div class="label">Límite</div><div class="val">${fmt(state.tc.limite)}</div></div><div class="tc-box"><div class="label">Gastado</div><div class="val" style="color:var(--accent2)">${fmt(tcGast)}</div></div><div class="tc-box"><div class="label">Disponible</div><div class="val" style="color:${tcDisp<0?'var(--danger)':'var(--green)'">${fmt(tcDisp)}</div></div></div><div class="progress-label" style="font-size:11px;color:var(--muted);display:flex;justify-content:space-between;margin-bottom:4px"><span>Uso del límite</span><span>${pct}%</span></div><div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${color}"></div></div>`;
+  }
+  const tcGastos = gastosDelPeriodoTC().sort((a,b) => b.fecha.localeCompare(a.fecha));
+  lista.innerHTML = !tcGastos.length ? '<div class="empty-state"><div class="empty-text">Sin gastos con TC este periodo.</div></div>'
     : tcGastos.map(g => { const p = state.partidas.find(x => x.id===g.partidaId);
-      return `<div class="gasto-item">
-        <div class="gasto-left"><div class="gasto-desc">${p?p.icono||'📌':'❓'} ${g.desc}</div><div class="gasto-meta">${p?p.nombre:'Sin partida'} · ${g.fecha}</div></div>
-        <div class="gasto-right"><div class="gasto-monto">${fmt(g.monto)}</div></div>
-        <div class="gasto-btns"><button class="edit-btn" onclick="openEditGasto('${g.id}')">✏️</button><button class="delete-btn" onclick="deleteGasto('${g.id}')">×</button></div>
-      </div>`; }).join('');
+      return `<div class="gasto-item"><div class="gasto-left"><div class="gasto-desc">${p?p.icono||'📌':'❓'} ${g.desc}</div><div class="gasto-meta">${p?p.nombre:'Sin partida'} · ${g.fecha}</div></div><div class="gasto-right"><div class="gasto-monto">${fmt(g.monto)}</div></div><div class="gasto-btns"><button class="edit-btn" onclick="openEditGasto('${g.id}')")>✏️</button><button class="delete-btn" onclick="deleteGasto('${g.id}')")>×</button></div></div>`; }).join(');
 }
 
 // ============ PARTIDAS ============
@@ -737,6 +793,7 @@ function setFiltro(f,el) { state.filtroGastos=f; document.querySelectorAll('.fil
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 document.querySelectorAll('.modal-overlay').forEach(m => m.addEventListener('click', e => { if (e.target===m) m.classList.remove('open'); }));
 
+checkCierreAutomatico();
 render();
 </script>
 </body>
