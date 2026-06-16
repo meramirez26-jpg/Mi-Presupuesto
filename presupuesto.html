@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>Mi Presupuesto</title>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://accounts.google.com/gsi/client"></script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -360,7 +360,8 @@ let driveFileId = null;
 let driveUser = localStorage.getItem('gdrive_user') || null;
 
 function initGsi() {
-  if (typeof google === 'undefined') return;
+  if (typeof google === 'undefined' || !google.accounts) return false;
+  if (tokenClient) return true;
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CLIENT_ID,
     scope: SCOPES,
@@ -373,6 +374,7 @@ function initGsi() {
       updateDriveUI();
     }
   });
+  return true;
 }
 
 window.addEventListener('load', () => {
@@ -382,16 +384,23 @@ window.addEventListener('load', () => {
     updateDriveUI();
     loadFromDrive();
   }
-  setTimeout(initGsi, 1500);
+  // Try to init GSI after load
+  let attempts = 0;
+  const tryInit = setInterval(() => {
+    attempts++;
+    if (initGsi() || attempts > 10) clearInterval(tryInit);
+  }, 500);
 });
 
 function handleGdriveBtn() {
-  if (accessToken) {
-    disconnectDrive();
-  } else {
-    if (!tokenClient) { initGsi(); setTimeout(() => tokenClient && tokenClient.requestAccessToken(), 500); }
-    else tokenClient.requestAccessToken();
+  if (accessToken) { disconnectDrive(); return; }
+  // Try to init if not ready
+  if (!initGsi()) {
+    showToast('⏳ Cargando Google... intenta de nuevo');
+    setTimeout(() => { initGsi(); }, 1000);
+    return;
   }
+  tokenClient.requestAccessToken();
 }
 
 function disconnectDrive() {
